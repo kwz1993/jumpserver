@@ -11,13 +11,18 @@ from .models import Organization
 
 
 def get_org_from_request(request):
-    oid = request.session.get("oid")
+    # query中优先级最高
+    oid = request.GET.get("oid")
+
+    # 其次header
     if not oid:
         oid = request.META.get("HTTP_X_JMS_ORG")
-
-    request_params_oid = request.GET.get("oid")
-    if request_params_oid:
-        oid = request.GET.get("oid")
+    # 其次cookie
+    if not oid:
+        oid = request.COOKIES.get('X-JMS-ORG')
+    # 其次session
+    if not oid:
+        oid = request.session.get("oid")
 
     if not oid:
         oid = Organization.DEFAULT_ID
@@ -25,7 +30,7 @@ def get_org_from_request(request):
         oid = Organization.DEFAULT_ID
     elif oid.lower() == "root":
         oid = Organization.ROOT_ID
-    org = Organization.get_instance(oid)
+    org = Organization.get_instance(oid, True)
     return org
 
 
@@ -58,6 +63,47 @@ def get_current_org():
 def get_current_org_id():
     org_id = _find('current_org_id')
     return org_id
+
+
+def construct_org_mapper():
+    orgs = Organization.objects.all()
+    org_mapper = {str(org.id): org for org in orgs}
+    default_org = Organization.default()
+    org_mapper.update({
+        '': default_org,
+        Organization.DEFAULT_ID: default_org,
+        Organization.ROOT_ID: Organization.root(),
+        Organization.SYSTEM_ID: Organization.system()
+    })
+    return org_mapper
+
+
+def set_org_mapper(org_mapper):
+    setattr(thread_local, 'org_mapper', org_mapper)
+
+
+def get_org_mapper():
+    org_mapper = _find('org_mapper')
+    if org_mapper is None:
+        org_mapper = construct_org_mapper()
+        set_org_mapper(org_mapper)
+    return org_mapper
+
+
+def get_org_by_id(org_id):
+    org_id = str(org_id)
+    org_mapper = get_org_mapper()
+    org = org_mapper.get(org_id)
+    return org
+
+
+def get_org_name_by_id(org_id):
+    org = get_org_by_id(org_id)
+    if org:
+        org_name = org.name
+    else:
+        org_name = 'Not Found'
+    return org_name
 
 
 def get_current_org_id_for_serializer():

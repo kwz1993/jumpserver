@@ -7,18 +7,22 @@ import string
 import random
 
 from django.conf import settings
-from django.contrib.auth.hashers import make_password
 from django.contrib.auth.models import AbstractUser
 from django.core.cache import cache
 from django.db import models
+from django.db.models import TextChoices
 
 from django.utils.translation import ugettext_lazy as _
 from django.utils import timezone
 from django.shortcuts import reverse
 
+from common.local import LOCAL_DYNAMIC_SETTINGS
 from orgs.utils import current_org
-from common.utils import signer, date_expired_default, get_logger, lazyproperty
+from orgs.models import OrganizationMember, Organization
+from common.utils import date_expired_default, get_logger, lazyproperty
 from common import fields
+from common.const import choices
+from common.db.models import ChoiceSet
 from ..signals import post_user_change_password
 
 
@@ -47,6 +51,11 @@ class AuthMixin:
             post_user_change_password.send(self.__class__, user=self)
             super().set_password(raw_password)
 
+    def set_public_key(self, public_key):
+        if self.can_update_ssh_key():
+            self.public_key = public_key
+            self.save()
+
     def can_update_password(self):
         return self.is_local
 
@@ -54,7 +63,7 @@ class AuthMixin:
         return self.can_use_ssh_key_login()
 
     def can_use_ssh_key_login(self):
-        return settings.TERMINAL_PUBLIC_KEY_AUTH
+        return self.is_local and settings.TERMINAL_PUBLIC_KEY_AUTH
 
     def is_public_key_valid(self):
         """
@@ -78,6 +87,17 @@ class AuthMixin:
             except (TabError, TypeError):
                 pass
         return PubKey()
+
+    def get_public_key_comment(self):
+        return self.public_key_obj.comment
+
+    def get_public_key_hash_md5(self):
+        if not callable(self.public_key_obj.hash_md5):
+            return ''
+        try:
+            return self.public_key_obj.hash_md5()
+        except:
+            return ''
 
     def reset_password(self, new_password):
         self.set_password(new_password)
@@ -133,35 +153,70 @@ class AuthMixin:
 
 
 class RoleMixin:
-    ROLE_ADMIN = 'Admin'
-    ROLE_USER = 'User'
-    ROLE_APP = 'App'
-    ROLE_AUDITOR = 'Auditor'
+    class ROLE(ChoiceSet):
+        ADMIN = choices.ADMIN, _('System administrator')
+        AUDITOR = choices.AUDITOR, _('System auditor')
+        USER = choices.USER, _('User')
+        APP = 'App', _('Application')
 
-    ROLE_CHOICES = (
-        (ROLE_ADMIN, _('Administrator')),
-        (ROLE_USER, _('User')),
-        (ROLE_APP, _('Application')),
-        (ROLE_AUDITOR, _("Auditor"))
-    )
-    role = ROLE_USER
+    role = ROLE.USER
 
     @property
     def role_display(self):
+        return self.get_role_display()
+
+    @lazyproperty
+    def org_roles(self):
+        from orgs.models import ROLE as ORG_ROLE
+
         if not current_org.is_real():
-            return self.get_role_display()
-        roles = []
-        if self in current_org.get_org_admins():
-            roles.append(str(_('Org admin')))
-        if self in current_org.get_org_auditors():
-            roles.append(str(_('Org auditor')))
-        if self in current_org.get_org_users():
-            roles.append(str(_('User')))
-        return " | ".join(roles)
+            # 不是真实的组织，取 User 本身的角色
+            if self.is_superuser:
+                return [ORG_ROLE.ADMIN]
+            else:
+                return [ORG_ROLE.USER]
+
+        # 是真实组织，取 OrganizationMember 中的角色
+        roles = [
+            org_member.role
+            for org_member in self.m2m_org_members.all()
+            if org_member.org_id == current_org.id
+        ]
+        roles.sort()
+        return roles
+
+    @lazyproperty
+    def org_roles_label_list(self):
+        from orgs.models import ROLE as ORG_ROLE
+        return [str(ORG_ROLE[role]) for role in self.org_roles if role in ORG_ROLE]
+
+    @lazyproperty
+    def org_role_display(self):
+        return ' | '.join(self.org_roles_label_list)
+
+    @lazyproperty
+    def total_role_display(self):
+        roles = list({self.role_display, *self.org_roles_label_list})
+        roles.sort()
+        return ' | '.join(roles)
+
+    def current_org_roles(self):
+        from orgs.models import OrganizationMember, ROLE as ORG_ROLE
+        if not current_org.is_real():
+            if self.is_superuser:
+                return [ORG_ROLE.ADMIN]
+            else:
+                return [ORG_ROLE.USER]
+
+        roles = list(set(OrganizationMember.objects.filter(
+            org_id=current_org.id, user=self
+        ).values_list('role', flat=True)))
+
+        return roles
 
     @property
     def is_superuser(self):
-        if self.role == 'Admin':
+        if self.role == self.ROLE.ADMIN:
             return True
         else:
             return False
@@ -169,13 +224,13 @@ class RoleMixin:
     @is_superuser.setter
     def is_superuser(self, value):
         if value is True:
-            self.role = 'Admin'
+            self.role = self.ROLE.ADMIN
         else:
-            self.role = 'User'
+            self.role = self.ROLE.USER
 
     @property
     def is_super_auditor(self):
-        return self.role == 'Auditor'
+        return self.role == self.ROLE.AUDITOR
 
     @property
     def is_common_user(self):
@@ -189,7 +244,12 @@ class RoleMixin:
 
     @property
     def is_app(self):
-        return self.role == 'App'
+        return self.role == self.ROLE.APP
+
+    @lazyproperty
+    def user_all_orgs(self):
+        from orgs.models import Organization
+        return Organization.get_user_all_orgs(self)
 
     @lazyproperty
     def user_orgs(self):
@@ -213,14 +273,16 @@ class RoleMixin:
 
     @lazyproperty
     def is_org_admin(self):
-        if self.is_superuser or self.related_admin_orgs.exists():
+        from orgs.models import ROLE as ORG_ROLE
+        if self.is_superuser or self.m2m_org_members.filter(role=ORG_ROLE.ADMIN).exists():
             return True
         else:
             return False
 
     @lazyproperty
     def is_org_auditor(self):
-        if self.is_super_auditor or self.related_audit_orgs.exists():
+        from orgs.models import ROLE as ORG_ROLE
+        if self.is_super_auditor or self.m2m_org_members.filter(role=ORG_ROLE.AUDITOR).exists():
             return True
         else:
             return False
@@ -256,7 +318,7 @@ class RoleMixin:
     def create_app_user(cls, name, comment):
         app = cls.objects.create(
             username=name, name=name, email='{}@local.domain'.format(name),
-            is_active=False, role='App', comment=comment,
+            is_active=False, role=cls.ROLE.APP, comment=comment,
             is_first_login=False, created_by='System'
         )
         access_key = app.create_access_key()
@@ -265,12 +327,30 @@ class RoleMixin:
     def remove(self):
         if not current_org.is_real():
             return
-        if self.can_user_current_org:
-            current_org.users.remove(self)
-        if self.can_admin_current_org:
-            current_org.admins.remove(self)
-        if self.can_audit_current_org:
-            current_org.auditors.remove(self)
+        org = Organization.get_instance(current_org.id)
+        OrganizationMember.objects.remove_users(org, [self])
+
+    @classmethod
+    def get_super_admins(cls):
+        return cls.objects.filter(role=cls.ROLE.ADMIN)
+
+    @classmethod
+    def get_org_admins(cls, org=None):
+        from orgs.models import Organization
+        if not isinstance(org, Organization):
+            org = current_org
+        org_admins = org.admins
+        return org_admins
+
+    @classmethod
+    def get_super_and_org_admins(cls, org=None):
+        super_admins = cls.get_super_admins()
+        super_admins_id = list(super_admins.values_list('id', flat=True))
+        org_admins = cls.get_org_admins(org)
+        org_admins_id = list(org_admins.values_list('id', flat=True))
+        admins_id = set(org_admins_id + super_admins_id)
+        admins = User.objects.filter(id__in=admins_id)
+        return admins
 
 
 class TokenMixin:
@@ -332,16 +412,20 @@ class TokenMixin:
 
     @classmethod
     def validate_reset_password_token(cls, token):
+        if not token:
+            return None
+        key = cls.CACHE_KEY_USER_RESET_PASSWORD_PREFIX.format(token)
+        value = cache.get(key)
+        if not value:
+            return None
         try:
-            key = cls.CACHE_KEY_USER_RESET_PASSWORD_PREFIX.format(token)
-            value = cache.get(key)
             user_id = value.get('id', '')
             email = value.get('email', '')
             user = cls.objects.get(id=user_id, email=email)
+            return user
         except (AttributeError, cls.DoesNotExist) as e:
             logger.error(e, exc_info=True)
-            user = None
-        return user
+            return None
 
     def set_cache(self, token):
         key = self.CACHE_KEY_USER_RESET_PASSWORD_PREFIX.format(token)
@@ -368,7 +452,7 @@ class MFAMixin:
 
     @property
     def mfa_force_enabled(self):
-        if settings.SECURITY_MFA_AUTH:
+        if LOCAL_DYNAMIC_SETTINGS.SECURITY_MFA_AUTH:
             return True
         return self.mfa_level == 2
 
@@ -415,23 +499,17 @@ class MFAMixin:
         if not self.mfa_enabled:
             return False, None
         if self.mfa_is_otp() and not self.otp_secret_key:
-            return True, reverse('users:user-otp-enable-start')
+            return True, reverse('authentication:user-otp-enable-start')
         return False, None
 
 
 class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
-    SOURCE_LOCAL = 'local'
-    SOURCE_LDAP = 'ldap'
-    SOURCE_OPENID = 'openid'
-    SOURCE_RADIUS = 'radius'
-    SOURCE_CAS = 'cas'
-    SOURCE_CHOICES = (
-        (SOURCE_LOCAL, _('Local')),
-        (SOURCE_LDAP, 'LDAP/AD'),
-        (SOURCE_OPENID, 'OpenID'),
-        (SOURCE_RADIUS, 'Radius'),
-        (SOURCE_CAS, 'CAS'),
-    )
+    class Source(TextChoices):
+        local = 'local', _('Local')
+        ldap = 'ldap', 'LDAP/AD'
+        openid = 'openid', 'OpenID'
+        radius = 'radius', 'Radius'
+        cas = 'cas', 'CAS'
 
     id = models.UUIDField(default=uuid.uuid4, primary_key=True)
     username = models.CharField(
@@ -446,7 +524,7 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
         blank=True, verbose_name=_('User group')
     )
     role = models.CharField(
-        choices=RoleMixin.ROLE_CHOICES, default='User', max_length=10,
+        choices=RoleMixin.ROLE.choices, default='User', max_length=10,
         blank=True, verbose_name=_('Role')
     )
     avatar = models.ImageField(
@@ -481,7 +559,7 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
         max_length=30, default='', blank=True, verbose_name=_('Created by')
     )
     source = models.CharField(
-        max_length=30, default=SOURCE_LOCAL, choices=SOURCE_CHOICES,
+        max_length=30, default=Source.local.value, choices=Source.choices,
         verbose_name=_('Source')
     )
     date_password_last_updated = models.DateTimeField(
@@ -532,7 +610,7 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
 
     @property
     def is_local(self):
-        return self.source == self.SOURCE_LOCAL
+        return self.source == self.Source.local.value
 
     def set_unprovide_attr_if_need(self):
         if not self.name:
@@ -562,6 +640,11 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
     def get_avatar_url(cls, username):
         user_default = settings.STATIC_URL + "img/avatar/user.png"
         return user_default
+
+    # def admin_orgs(self):
+    #     from orgs.models import Organization
+    #     orgs = Organization.get_user_admin_or_audit_orgs(self)
+    #     return orgs
 
     def avatar_url(self):
         admin_default = settings.STATIC_URL + "img/avatar/admin.png"
@@ -597,31 +680,6 @@ class User(AuthMixin, TokenMixin, RoleMixin, MFAMixin, AbstractUser):
         user.groups.add(UserGroup.initial())
 
     def can_send_created_mail(self):
-        if self.email and self.source == self.SOURCE_LOCAL:
+        if self.email and self.source == self.Source.local.value:
             return True
         return False
-
-    @classmethod
-    def generate_fake(cls, count=100):
-        from random import seed, choice
-        import forgery_py
-        from django.db import IntegrityError
-        from .group import UserGroup
-
-        seed()
-        for i in range(count):
-            user = cls(username=forgery_py.internet.user_name(True),
-                       email=forgery_py.internet.email_address(),
-                       name=forgery_py.name.full_name(),
-                       password=make_password(forgery_py.lorem_ipsum.word()),
-                       role=choice(list(dict(User.ROLE_CHOICES).keys())),
-                       wechat=forgery_py.internet.user_name(True),
-                       comment=forgery_py.lorem_ipsum.sentence(),
-                       created_by=choice(cls.objects.all()).username)
-            try:
-                user.save()
-            except IntegrityError:
-                print('Duplicate Error, continue ...')
-                continue
-            user.groups.add(choice(UserGroup.objects.all()))
-            user.save()

@@ -138,11 +138,11 @@ function setAjaxCSRFToken() {
 }
 
 function activeNav(prefix) {
-    var path = document.location.pathname;
-    if (prefix) {
-        path = path.replace(prefix, '');
-        console.log(path);
+    if (!prefix) {
+        prefix = '/core'
     }
+    var path = document.location.pathname;
+    path = path.replace(prefix, '');
     var urlArray = path.split("/");
     var app = urlArray[1];
     var resource = urlArray[2];
@@ -1256,7 +1256,8 @@ function toSafeDateISOStr(s) {
 
 function toSafeLocalDateStr(d) {
     var date = safeDate(d);
-    var date_s = date.toLocaleString(getUserLang(), {hour12: false});
+    // var date_s = date.toLocaleString(getUserLang(), {hour12: false});
+    var date_s = date.toLocaleString(getUserLang(), {hourCycle: "h23"});
     return date_s.split("/").join('-')
 }
 

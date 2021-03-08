@@ -1,10 +1,11 @@
 import uuid
-from django.db import models
+
 from django.utils import timezone
 from django.utils.translation import ugettext_lazy as _, ugettext as __
 from rest_framework.authtoken.models import Token
 from django.conf import settings
 
+from common.db import models
 from common.mixins.models import CommonModelMixin
 from common.utils import get_object_or_none, get_request_ip, get_ip_city
 
@@ -48,31 +49,47 @@ class LoginConfirmSetting(CommonModelMixin):
     def get_user_confirm_setting(cls, user):
         return get_object_or_none(cls, user=user)
 
-    def create_confirm_ticket(self, request=None):
-        from tickets.models import Ticket
-        title = _('Login confirm') + '{}'.format(self.user)
+    @staticmethod
+    def construct_confirm_ticket_meta(request=None):
         if request:
-            remote_addr = get_request_ip(request)
-            city = get_ip_city(remote_addr)
-            datetime = timezone.now().strftime('%Y-%m-%d %H:%M:%S')
-            body = __("{user_key}: {username}<br>"
-                      "IP: {ip}<br>"
-                      "{city_key}: {city}<br>"
-                      "{date_key}: {date}<br>").format(
-                user_key=__("User"), username=self.user,
-                ip=remote_addr, city_key=_("City"), city=city,
-                date_key=__("Datetime"), date=datetime
-            )
+            login_ip = get_request_ip(request)
         else:
-            body = ''
-        reviewer = self.reviewers.all()
-        ticket = Ticket.objects.create(
-            user=self.user, title=title, body=body,
-            type=Ticket.TYPE_LOGIN_CONFIRM,
-        )
-        ticket.assignees.set(reviewer)
+            login_ip = ''
+        login_ip = login_ip or '0.0.0.0'
+        login_city = get_ip_city(login_ip)
+        login_datetime = timezone.now().strftime('%Y-%m-%d %H:%M:%S')
+        ticket_meta = {
+            'apply_login_ip': login_ip,
+            'apply_login_city': login_city,
+            'apply_login_datetime': login_datetime,
+        }
+        return ticket_meta
+
+    def create_confirm_ticket(self, request=None):
+        from tickets import const
+        from tickets.models import Ticket
+        ticket_title = _('Login confirm') + ' {}'.format(self.user)
+        ticket_meta = self.construct_confirm_ticket_meta(request)
+        ticket_assignees = self.reviewers.all()
+        data = {
+            'title': ticket_title,
+            'type': const.TicketTypeChoices.login_confirm.value,
+            'meta': ticket_meta,
+        }
+        ticket = Ticket.objects.create(**data)
+        ticket.assignees.set(ticket_assignees)
+        ticket.open(self.user)
         return ticket
 
     def __str__(self):
         return '{} confirm'.format(self.user.username)
 
+
+class SSOToken(models.JMSBaseModel):
+    """
+    类似腾讯企业邮的 [单点登录](https://exmail.qq.com/qy_mng_logic/doc#10036)
+    出于安全考虑，这里的 `token` 使用一次随即过期。但我们保留每一个生成过的 `token`。
+    """
+    authkey = models.UUIDField(primary_key=True, default=uuid.uuid4, verbose_name=_('Token'))
+    expired = models.BooleanField(default=False, verbose_name=_('Expired'))
+    user = models.ForeignKey('users.User', on_delete=models.PROTECT, verbose_name=_('User'), db_constraint=False)

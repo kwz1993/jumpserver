@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 #
+import coreapi
 from django.conf import settings
 from rest_framework.response import Response
 from rest_framework import generics, filters
@@ -27,7 +28,7 @@ logger = get_logger(__name__)
 class AssetUserFilterBackend(filters.BaseFilterBackend):
     def filter_queryset(self, request, queryset, view):
         kwargs = {}
-        for field in view.filter_fields:
+        for field in view.filterset_fields:
             value = request.GET.get(field)
             if not value:
                 continue
@@ -54,6 +55,15 @@ class AssetUserSearchBackend(filters.BaseFilterBackend):
 
 
 class AssetUserLatestFilterBackend(filters.BaseFilterBackend):
+    def get_schema_fields(self, view):
+        return [
+            coreapi.Field(
+                name='latest', location='query', required=False,
+                type='string', example='1',
+                description='Only the latest version'
+            )
+        ]
+
     def filter_queryset(self, request, queryset, view):
         latest = request.GET.get('latest') == '1'
         if latest:
@@ -64,11 +74,11 @@ class AssetUserLatestFilterBackend(filters.BaseFilterBackend):
 class AssetUserViewSet(CommonApiMixin, BulkModelViewSet):
     serializer_classes = {
         'default': serializers.AssetUserWriteSerializer,
-        'list': serializers.AssetUserReadSerializer,
+        'display': serializers.AssetUserReadSerializer,
         'retrieve': serializers.AssetUserReadSerializer,
     }
     permission_classes = [IsOrgAdminOrAppUser]
-    filter_fields = [
+    filterset_fields = [
         "id", "ip", "hostname", "username",
         "asset_id", "node_id",
         "prefer", "prefer_id",
@@ -84,12 +94,15 @@ class AssetUserViewSet(CommonApiMixin, BulkModelViewSet):
 
     def get_object(self):
         pk = self.kwargs.get("pk")
+        if pk is None:
+            return
         queryset = self.get_queryset()
         obj = queryset.get(id=pk)
         return obj
 
     def get_exception_handler(self):
         def handler(e, context):
+            logger.error(e, exc_info=True)
             return Response({"error": str(e)}, status=400)
         return handler
 
@@ -118,7 +131,7 @@ class AssetUserTaskCreateAPI(generics.CreateAPIView):
     permission_classes = (IsOrgAdminOrAppUser,)
     serializer_class = serializers.AssetUserTaskSerializer
     filter_backends = AssetUserViewSet.filter_backends
-    filter_fields = AssetUserViewSet.filter_fields
+    filterset_fields = AssetUserViewSet.filterset_fields
 
     def get_asset_users(self):
         manager = AssetUserManager()

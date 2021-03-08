@@ -158,9 +158,11 @@ class AuthMixin:
         if update_fields:
             self.save(update_fields=update_fields)
 
-    def has_special_auth(self, asset=None):
+    def has_special_auth(self, asset=None, username=None):
         from .authbook import AuthBook
-        queryset = AuthBook.objects.filter(username=self.username)
+        if username is None:
+            username = self.username
+        queryset = AuthBook.objects.filter(username=username)
         if asset:
             queryset = queryset.filter(asset=asset)
         return queryset.exists()
@@ -230,7 +232,7 @@ class AuthMixin:
 class BaseUser(OrgModelMixin, AuthMixin, ConnectivityMixin):
     id = models.UUIDField(default=uuid.uuid4, primary_key=True)
     name = models.CharField(max_length=128, verbose_name=_('Name'))
-    username = models.CharField(max_length=32, blank=True, verbose_name=_('Username'), validators=[alphanumeric], db_index=True)
+    username = models.CharField(max_length=128, blank=True, verbose_name=_('Username'), validators=[alphanumeric], db_index=True)
     password = fields.EncryptCharField(max_length=256, blank=True, null=True, verbose_name=_('Password'))
     private_key = fields.EncryptTextField(blank=True, null=True, verbose_name=_('SSH private key'))
     public_key = fields.EncryptTextField(blank=True, null=True, verbose_name=_('SSH public key'))

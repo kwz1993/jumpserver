@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'authentication.apps.AuthenticationConfig',  # authentication
     'applications.apps.ApplicationsConfig',
     'tickets.apps.TicketsConfig',
+    'jms_oidc_rp',
     'rest_framework',
     'rest_framework_swagger',
     'drf_yasg',
@@ -63,6 +64,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.forms',
 ]
 
 
@@ -75,12 +77,13 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'authentication.backends.openid.middleware.OpenIDAuthenticationMiddleware',
-    'django_cas_ng.middleware.CASMiddleware',
     'jumpserver.middleware.TimezoneMiddleware',
     'jumpserver.middleware.DemoMiddleware',
     'jumpserver.middleware.RequestMiddleware',
+    'jumpserver.middleware.RefererCheckMiddleware',
     'orgs.middleware.OrgMiddleware',
+    'authentication.backends.oidc.middleware.OIDCRefreshIDTokenMiddleware',
+    'authentication.backends.cas.middleware.CASMiddleware',
 ]
 
 
@@ -103,6 +106,7 @@ TEMPLATES = [
                 'django.template.context_processors.media',
                 'jumpserver.context_processor.jumpserver_processor',
                 'orgs.context_processor.org_processor',
+                'jms_oidc_rp.context_processors.oidc',
             ],
         },
     },
@@ -173,9 +177,9 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/1.10/topics/i18n/
 # LANGUAGE_CODE = 'en'
-LANGUAGE_CODE = 'zh'
+LANGUAGE_CODE = CONFIG.LANGUAGE_CODE
 
-TIME_ZONE = 'Asia/Shanghai'
+TIME_ZONE = CONFIG.TIME_ZONE
 
 USE_I18N = True
 
@@ -232,16 +236,20 @@ FILE_UPLOAD_DIRECTORY_PERMISSIONS = 0o755
 # Cache use redis
 CACHES = {
     'default': {
-        'BACKEND': 'redis_cache.RedisCache',
+        # 'BACKEND': 'redis_cache.RedisCache',
+        'BACKEND': 'redis_lock.django_cache.RedisCache',
         'LOCATION': 'redis://:%(password)s@%(host)s:%(port)s/%(db)s' % {
             'password': CONFIG.REDIS_PASSWORD,
             'host': CONFIG.REDIS_HOST,
             'port': CONFIG.REDIS_PORT,
             'db': CONFIG.REDIS_DB_CACHE,
+        },
+        'OPTIONS': {
+            "REDIS_CLIENT_KWARGS": {"health_check_interval": 30}
         }
     }
 }
 
-
 FORCE_SCRIPT_NAME = CONFIG.FORCE_SCRIPT_NAME
-
+SESSION_COOKIE_SECURE = CONFIG.SESSION_COOKIE_SECURE
+CSRF_COOKIE_SECURE = CONFIG.CSRF_COOKIE_SECURE

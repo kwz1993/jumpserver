@@ -2,11 +2,10 @@ from rest_framework import serializers
 from django.utils.translation import ugettext_lazy as _
 from django.db.models import Count
 
-from common.serializers import AdaptedBulkListSerializer
+from common.drf.serializers import AdaptedBulkListSerializer
 from common.mixins.serializers import BulkSerializerMixin
 from common.utils import ssh_pubkey_gen
 from orgs.mixins.serializers import BulkOrgResourceModelSerializer
-from assets.models import Node
 from ..models import SystemUser, Asset
 from .base import AuthSerializerMixin
 
@@ -33,17 +32,20 @@ class SystemUserSerializer(AuthSerializerMixin, BulkOrgResourceModelSerializer):
             'login_mode', 'login_mode_display',
             'priority', 'username_same_with_user',
             'auto_push', 'cmd_filters', 'sudo', 'shell', 'comment',
-            'auto_generate_key', 'sftp_root',
-            'assets_amount',
+            'auto_generate_key', 'sftp_root', 'token',
+            'assets_amount', 'date_created', 'created_by',
+            'home', 'system_groups', 'ad_domain'
         ]
         extra_kwargs = {
             'password': {"write_only": True},
             'public_key': {"write_only": True},
             'private_key': {"write_only": True},
-            'nodes_amount': {'label': _('Node')},
-            'assets_amount': {'label': _('Asset')},
+            'token': {"write_only": True},
+            'nodes_amount': {'label': _('Nodes amount')},
+            'assets_amount': {'label': _('Assets amount')},
             'login_mode_display': {'label': _('Login mode display')},
             'created_by': {'read_only': True},
+            'ad_domain': {'required': False, 'allow_blank': True, 'label': _('Ad domain')},
         }
 
     def validate_auto_push(self, value):
@@ -143,16 +145,28 @@ class SystemUserSerializer(AuthSerializerMixin, BulkOrgResourceModelSerializer):
 
 
 class SystemUserListSerializer(SystemUserSerializer):
+
     class Meta(SystemUserSerializer.Meta):
         fields = [
             'id', 'name', 'username', 'protocol',
+            'password', 'public_key', 'private_key',
             'login_mode', 'login_mode_display',
             'priority', "username_same_with_user",
             'auto_push', 'sudo', 'shell', 'comment',
-            "assets_amount",
-            'auto_generate_key',
+            "assets_amount", 'home', 'system_groups',
+            'auto_generate_key', 'ad_domain',
             'sftp_root',
         ]
+        extra_kwargs = {
+            'password': {"write_only": True},
+            'public_key': {"write_only": True},
+            'private_key': {"write_only": True},
+            'nodes_amount': {'label': _('Nodes amount')},
+            'assets_amount': {'label': _('Assets amount')},
+            'login_mode_display': {'label': _('Login mode display')},
+            'created_by': {'read_only': True},
+            'ad_domain': {'label': _('Ad domain')},
+        }
 
     @classmethod
     def setup_eager_loading(cls, queryset):
@@ -169,7 +183,8 @@ class SystemUserWithAuthInfoSerializer(SystemUserSerializer):
             'login_mode', 'login_mode_display',
             'priority', 'username_same_with_user',
             'auto_push', 'sudo', 'shell', 'comment',
-            'auto_generate_key', 'sftp_root',
+            'auto_generate_key', 'sftp_root', 'token',
+            'ad_domain',
         ]
         extra_kwargs = {
             'nodes_amount': {'label': _('Node')},
@@ -219,15 +234,8 @@ class SystemUserNodeRelationSerializer(RelationMixin, serializers.ModelSerialize
             'id', 'node', "node_display",
         ]
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.tree = Node.tree()
-
     def get_node_display(self, obj):
-        if hasattr(obj, 'node_key'):
-            return self.tree.get_node_full_tag(obj.node_key)
-        else:
-            return obj.node.full_value
+        return obj.node.full_value
 
 
 class SystemUserUserRelationSerializer(RelationMixin, serializers.ModelSerializer):
@@ -248,5 +256,9 @@ class SystemUserTaskSerializer(serializers.Serializer):
     action = serializers.ChoiceField(choices=ACTION_CHOICES, write_only=True)
     asset = serializers.PrimaryKeyRelatedField(
         queryset=Asset.objects, allow_null=True, required=False, write_only=True
+    )
+    assets = serializers.PrimaryKeyRelatedField(
+        queryset=Asset.objects, allow_null=True, required=False, write_only=True,
+        many=True
     )
     task = serializers.CharField(read_only=True)

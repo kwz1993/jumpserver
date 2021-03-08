@@ -2,7 +2,7 @@
 #
 from rest_framework import serializers
 
-from common.serializers import AdaptedBulkListSerializer
+from common.drf.serializers import AdaptedBulkListSerializer
 from orgs.mixins.serializers import BulkOrgResourceModelSerializer
 
 from ..models import Label
@@ -20,6 +20,9 @@ class LabelSerializer(BulkOrgResourceModelSerializer):
         read_only_fields = (
             'category', 'date_created', 'asset_count', 'get_category_display'
         )
+        extra_kwargs = {
+            'assets': {'required': False}
+        }
         list_serializer_class = AdaptedBulkListSerializer
 
     @staticmethod

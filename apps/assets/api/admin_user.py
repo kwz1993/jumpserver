@@ -1,17 +1,4 @@
-# ~*~ coding: utf-8 ~*~
-# Copyright (C) 2014-2018 Beijing DuiZhan Technology Co.,Ltd. All Rights Reserved.
-#
-# Licensed under the GNU General Public License v2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#    http://www.gnu.org/licenses/gpl-2.0.html
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
 
 from django.db import transaction
 from django.db.models import Count
@@ -42,14 +29,14 @@ class AdminUserViewSet(OrgBulkModelViewSet):
     Admin user api set, for add,delete,update,list,retrieve resource
     """
     model = AdminUser
-    filter_fields = ("name", "username")
-    search_fields = filter_fields
+    filterset_fields = ("name", "username")
+    search_fields = filterset_fields
     serializer_class = serializers.AdminUserSerializer
     permission_classes = (IsOrgAdmin,)
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        queryset = queryset.annotate(_assets_amount=Count('assets'))
+        queryset = queryset.annotate(assets_amount=Count('assets'))
         return queryset
 
     def destroy(self, request, *args, **kwargs):
@@ -106,9 +93,8 @@ class AdminUserTestConnectiveApi(generics.RetrieveAPIView):
 class AdminUserAssetsListView(generics.ListAPIView):
     permission_classes = (IsOrgAdmin,)
     serializer_class = serializers.AssetSimpleSerializer
-    filter_fields = ("hostname", "ip")
-    http_method_names = ['get']
-    search_fields = filter_fields
+    filterset_fields = ("hostname", "ip")
+    search_fields = filterset_fields
 
     def get_object(self):
         pk = self.kwargs.get('pk')

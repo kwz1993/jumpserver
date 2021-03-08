@@ -34,16 +34,6 @@ class LoginConfirmSettingUpdateApi(UpdateAPIView):
 class TicketStatusApi(mixins.AuthMixin, APIView):
     permission_classes = ()
 
-    def get_ticket(self):
-        from tickets.models import Ticket
-        ticket_id = self.request.session.get("auth_ticket_id")
-        logger.debug('Login confirm ticket id: {}'.format(ticket_id))
-        if not ticket_id:
-            ticket = None
-        else:
-            ticket = get_object_or_none(Ticket, pk=ticket_id)
-        return ticket
-
     def get(self, request, *args, **kwargs):
         try:
             self.check_user_login_confirm()
@@ -55,5 +45,5 @@ class TicketStatusApi(mixins.AuthMixin, APIView):
         ticket = self.get_ticket()
         if ticket:
             request.session.pop('auth_ticket_id', '')
-            ticket.perform_status('closed', request.user)
+            ticket.close(processor=request.user)
         return Response('', status=200)

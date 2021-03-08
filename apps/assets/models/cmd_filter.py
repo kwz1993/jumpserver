@@ -18,7 +18,7 @@ __all__ = [
 
 class CommandFilter(OrgModelMixin):
     id = models.UUIDField(default=uuid.uuid4, primary_key=True)
-    name = models.CharField(max_length=64, unique=True, verbose_name=_("Name"))
+    name = models.CharField(max_length=64, verbose_name=_("Name"))
     is_active = models.BooleanField(default=True, verbose_name=_('Is active'))
     comment = models.TextField(blank=True, default='', verbose_name=_("Comment"))
     date_created = models.DateTimeField(auto_now_add=True)
@@ -29,6 +29,7 @@ class CommandFilter(OrgModelMixin):
         return self.name
 
     class Meta:
+        unique_together = [('org_id', 'name')]
         verbose_name = _("Command filter")
 
 
@@ -51,7 +52,7 @@ class CommandFilterRule(OrgModelMixin):
     type = models.CharField(max_length=16, default=TYPE_COMMAND, choices=TYPE_CHOICES, verbose_name=_("Type"))
     priority = models.IntegerField(default=50, verbose_name=_("Priority"), help_text=_("1-100, the higher will be match first"),
                                    validators=[MinValueValidator(1), MaxValueValidator(100)])
-    content = models.TextField(max_length=1024, verbose_name=_("Content"), help_text=_("One line one command"))
+    content = models.TextField(verbose_name=_("Content"), help_text=_("One line one command"))
     action = models.IntegerField(default=ACTION_DENY, choices=ACTION_CHOICES, verbose_name=_("Action"))
     comment = models.CharField(max_length=64, blank=True, default='', verbose_name=_("Comment"))
     date_created = models.DateTimeField(auto_now_add=True)

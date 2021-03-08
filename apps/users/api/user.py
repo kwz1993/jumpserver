@@ -1,52 +1,61 @@
 # ~*~ coding: utf-8 ~*~
-import uuid
-
 from django.core.cache import cache
-from django.contrib.auth import logout
 from django.utils.translation import ugettext as _
+from rest_framework.decorators import action
 
 from rest_framework import generics
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
 from rest_framework_bulk import BulkModelViewSet
+from django.db.models import Prefetch
 
 from common.permissions import (
-    IsOrgAdmin, IsCurrentUserOrReadOnly, IsOrgAdminOrAppUser,
+    IsOrgAdmin, IsOrgAdminOrAppUser,
     CanUpdateDeleteUser, IsSuperUser
 )
 from common.mixins import CommonApiMixin
 from common.utils import get_logger
 from orgs.utils import current_org
-from .. import serializers, utils
+from orgs.models import ROLE as ORG_ROLE, OrganizationMember
+from .. import serializers
+from ..serializers import UserSerializer, UserRetrieveSerializer, MiniUserSerializer, InviteSerializer
+from .mixins import UserQuerysetMixin
 from ..models import User
 from ..signals import post_user_create
+from ..filters import OrgRoleUserFilterBackend
 
 
 logger = get_logger(__name__)
 __all__ = [
     'UserViewSet', 'UserChangePasswordApi',
-    'UserResetPasswordApi', 'UserResetPKApi', 'UserUpdatePKApi',
-    'UserUnblockPKApi', 'UserProfileApi', 'UserResetOTPApi',
+    'UserUnblockPKApi', 'UserResetOTPApi',
 ]
 
 
-class UserQuerysetMixin:
-    def get_queryset(self):
-        queryset = utils.get_current_org_members()
-        return queryset
-
-
 class UserViewSet(CommonApiMixin, UserQuerysetMixin, BulkModelViewSet):
-    filter_fields = ('username', 'email', 'name', 'id')
-    search_fields = filter_fields
-    serializer_classes = {
-        'default': serializers.UserSerializer,
-        'display': serializers.UserDisplaySerializer
-    }
+    filterset_fields = ('username', 'email', 'name', 'id', 'source')
+    search_fields = filterset_fields
     permission_classes = (IsOrgAdmin, CanUpdateDeleteUser)
+    serializer_classes = {
+        'default': UserSerializer,
+        'retrieve': UserRetrieveSerializer,
+        'suggestion': MiniUserSerializer,
+        'invite': InviteSerializer,
+    }
+    extra_filter_backends = [OrgRoleUserFilterBackend]
 
     def get_queryset(self):
-        return super().get_queryset().prefetch_related('groups')
+        queryset = super().get_queryset().prefetch_related(
+            'groups'
+        )
+        if current_org.is_real():
+            # 为在列表中计算用户在真实组织里的角色
+            queryset = queryset.prefetch_related(
+                Prefetch(
+                    'm2m_org_members',
+                    queryset=OrganizationMember.objects.filter(org__id=current_org.id)
+                )
+            )
+        return queryset
 
     def send_created_signal(self, users):
         if not isinstance(users, list):
@@ -54,12 +63,26 @@ class UserViewSet(CommonApiMixin, UserQuerysetMixin, BulkModelViewSet):
         for user in users:
             post_user_create.send(self.__class__, user=user)
 
+    @staticmethod
+    def set_users_to_org(users, org_roles, update=False):
+        # 只有真实存在的组织才真正关联用户
+        if not current_org or not current_org.is_real():
+            return
+        for user, roles in zip(users, org_roles):
+            if update and roles is None:
+                continue
+            if not roles:
+                # 当前组织创建的用户，至少是该组织的`User`
+                roles = [ORG_ROLE.USER]
+            OrganizationMember.objects.set_user_roles(current_org, user, roles)
+
     def perform_create(self, serializer):
+        org_roles = self.get_serializer_org_roles(serializer)
+        # 创建用户
         users = serializer.save()
         if isinstance(users, User):
             users = [users]
-        if current_org and current_org.is_real():
-            current_org.users.add(*users)
+        self.set_users_to_org(users, org_roles)
         self.send_created_signal(users)
 
     def get_permissions(self):
@@ -80,15 +103,65 @@ class UserViewSet(CommonApiMixin, UserQuerysetMixin, BulkModelViewSet):
             self.check_object_permissions(self.request, obj)
             self.perform_destroy(obj)
 
+    @staticmethod
+    def get_serializer_org_roles(serializer):
+        validated_data = serializer.validated_data
+        # `org_roles` 先 `pop`
+        if isinstance(validated_data, list):
+            org_roles = [item.pop('org_roles', None) for item in validated_data]
+        else:
+            org_roles = [validated_data.pop('org_roles', None)]
+        return org_roles
+
+    def perform_update(self, serializer):
+        org_roles = self.get_serializer_org_roles(serializer)
+        users = serializer.save()
+        if isinstance(users, User):
+            users = [users]
+        self.set_users_to_org(users, org_roles, update=True)
+
     def perform_bulk_update(self, serializer):
         # TODO: 需要测试
         users_ids = [
             d.get("id") or d.get("pk") for d in serializer.validated_data
         ]
-        users = current_org.get_org_members().filter(id__in=users_ids)
+        users = current_org.get_members().filter(id__in=users_ids)
         for user in users:
             self.check_object_permissions(self.request, user)
         return super().perform_bulk_update(serializer)
+
+    @action(methods=['get'], detail=False, permission_classes=(IsOrgAdmin,))
+    def suggestion(self, request):
+        queryset = User.objects.exclude(role=User.ROLE.APP)
+        queryset = self.filter_queryset(queryset)
+        queryset = queryset[:3]
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(methods=['post'], detail=False, permission_classes=(IsOrgAdmin,))
+    def invite(self, request):
+        data = request.data
+        if not isinstance(data, list):
+            data = [request.data]
+        if not current_org or not current_org.is_real():
+            error = {"error": "Not a valid org"}
+            return Response(error, status=400)
+
+        serializer_cls = self.get_serializer_class()
+        serializer = serializer_cls(data=data, many=True)
+        serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
+        for i in validated_data:
+            i['org_id'] = current_org.org_id()
+        relations = [OrganizationMember(**i) for i in validated_data]
+        OrganizationMember.objects.bulk_create(relations, ignore_conflicts=True)
+        return Response(serializer.data, status=201)
 
 
 class UserChangePasswordApi(UserQuerysetMixin, generics.RetrieveUpdateAPIView):
@@ -98,44 +171,6 @@ class UserChangePasswordApi(UserQuerysetMixin, generics.RetrieveUpdateAPIView):
     def perform_update(self, serializer):
         user = self.get_object()
         user.password_raw = serializer.validated_data["password"]
-        user.save()
-
-
-class UserResetPasswordApi(UserQuerysetMixin, generics.UpdateAPIView):
-    queryset = User.objects.all()
-    serializer_class = serializers.UserSerializer
-    permission_classes = (IsAuthenticated,)
-
-    def perform_update(self, serializer):
-        # Note: we are not updating the user object here.
-        # We just do the reset-password stuff.
-        from ..utils import send_reset_password_mail
-        user = self.get_object()
-        user.password_raw = str(uuid.uuid4())
-        user.save()
-        send_reset_password_mail(user)
-
-
-class UserResetPKApi(UserQuerysetMixin, generics.UpdateAPIView):
-    serializer_class = serializers.UserSerializer
-    permission_classes = (IsAuthenticated,)
-
-    def perform_update(self, serializer):
-        from ..utils import send_reset_ssh_key_mail
-        user = self.get_object()
-        user.public_key = None
-        user.save()
-        send_reset_ssh_key_mail(user)
-
-
-# 废弃
-class UserUpdatePKApi(UserQuerysetMixin, generics.UpdateAPIView):
-    serializer_class = serializers.UserPKUpdateSerializer
-    permission_classes = (IsCurrentUserOrReadOnly,)
-
-    def perform_update(self, serializer):
-        user = self.get_object()
-        user.public_key = serializer.validated_data['public_key']
         user.save()
 
 
@@ -152,19 +187,6 @@ class UserUnblockPKApi(UserQuerysetMixin, generics.UpdateAPIView):
         key_block = self.key_prefix_block.format(username)
         cache.delete_pattern(key_limit)
         cache.delete(key_block)
-
-
-class UserProfileApi(generics.RetrieveAPIView):
-    permission_classes = (IsAuthenticated,)
-    serializer_class = serializers.UserSerializer
-
-    def get_object(self):
-        return self.request.user
-
-    def retrieve(self, request, *args, **kwargs):
-        age = request.session.get_expiry_age()
-        request.session.set_expiry(age)
-        return super().retrieve(request, *args, **kwargs)
 
 
 class UserResetOTPApi(UserQuerysetMixin, generics.RetrieveAPIView):

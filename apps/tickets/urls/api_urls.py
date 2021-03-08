@@ -8,10 +8,8 @@ app_name = 'tickets'
 router = BulkRouter()
 
 router.register('tickets', api.TicketViewSet, 'ticket')
-router.register('tickets/(?P<ticket_id>[0-9a-zA-Z\-]{36})/comments', api.TicketCommentViewSet, 'ticket-comment')
+router.register('assignees', api.AssigneeViewSet, 'assignee')
+router.register('comments', api.CommentViewSet, 'comment')
 
-
-urlpatterns = [
-]
-
+urlpatterns = []
 urlpatterns += router.urls

@@ -3,8 +3,9 @@
 import json
 from django.db import models
 from django.utils.translation import ugettext_lazy as _
+from django.utils.encoding import force_text
 
-from ..utils import signer
+from ..utils import signer, crypto
 
 
 __all__ = [
@@ -30,7 +31,7 @@ class JsonMixin:
     def json_encode(data):
         return json.dumps(data)
 
-    def from_db_value(self, value, expression, connection, context):
+    def from_db_value(self, value, expression, connection, context=None):
         if value is None:
             return value
         return self.json_decode(value)
@@ -53,7 +54,7 @@ class JsonMixin:
 class JsonTypeMixin(JsonMixin):
     tp = dict
 
-    def from_db_value(self, value, expression, connection, context):
+    def from_db_value(self, value, expression, connection, context=None):
         value = super().from_db_value(value, expression, connection, context)
         if not isinstance(value, self.tp):
             value = self.tp()
@@ -111,22 +112,38 @@ class EncryptMixin:
     """
     EncryptMixin要放在最前面
     """
-    def from_db_value(self, value, expression, connection, context):
+
+    def decrypt_from_signer(self, value):
+        return signer.unsign(value) or ''
+
+    def from_db_value(self, value, expression, connection, context=None):
         if value is None:
             return value
-        value = signer.unsign(value)
+        value = force_text(value)
+
+        plain_value = crypto.decrypt(value)
+
+        # 如果没有解开，使用原来的signer解密
+        if not plain_value:
+            plain_value = self.decrypt_from_signer(value)
+
+        # 可能和Json mix，所以要先解密，再json
         sp = super()
         if hasattr(sp, 'from_db_value'):
-            return sp.from_db_value(value, expression, connection, context)
-        return value
+            plain_value = sp.from_db_value(plain_value, expression, connection, context)
+        return plain_value
 
     def get_prep_value(self, value):
         if value is None:
             return value
+
+        # 先 json 再解密
         sp = super()
         if hasattr(sp, 'get_prep_value'):
             value = sp.get_prep_value(value)
-        return signer.sign(value)
+        value = force_text(value)
+        # 替换新的加密方式
+        return crypto.encrypt(value)
 
 
 class EncryptTextField(EncryptMixin, models.TextField):
